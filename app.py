@@ -1,102 +1,50 @@
-from flask import Flask, request, redirect, render_template_string
-import json
-import base64
-import time
-import os
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
+// server.js (Node.js Backend)
 
-app = Flask(__name__)
+const express = require('express');
+const fs = require('fs');
+const { google } = require('googleapis');
+const bodyParser = require('body-parser');
+const path = require('path');
 
-# Global session data storage
-session_store = {}
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-HTML_FORM = """
-<!DOCTYPE html>
-<html>
-<head>
-  <title>OTP Sender</title>
-  <style>
-    body { font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px; }
-    textarea, input { width: 100%; margin-bottom: 10px; padding: 10px; }
-    #status-bar { white-space: pre-wrap; background: #f8f8f8; padding: 10px; border: 1px solid #ccc; }
-  </style>
-</head>
-<body>
-  <h2>Bulk OTP Sender via Gmail API</h2>
+app.use(bodyParser.json());
+app.use(express.urlencoded({ extended: true }));
 
-  <form method="POST" action="/send-otps">
-    <label>Email List (one per line):</label><br>
-    <textarea name="emails" rows="10" required></textarea><br>
+// Serve frontend HTML directly without public folder
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Gmail OTP Sender</title>
+      <style>
+        body { font-family: Arial; margin: 20px; }
+        textarea, input { width: 100%; padding: 8px; margin: 5px 0; }
+        textarea { resize: vertical; }
+        .readonly { background: #eee; }
+        .counter { font-size: 14px; color: #666; margin-bottom: 10px; }
+      </style>
+    </head>
+    <body>
+      <h2>Send OTP via Gmail</h2>
+      <form method="POST" action="/send-otps">
+        <label>Emails (one per line):</label><br>
+        <textarea id="emails" name="emails" rows="10" required></textarea>
+        <div class="counter" id="emailCount">0 emails</div>
 
-    <label>Gmail API Credentials JSON:</label><br>
-    <textarea name="credentials" rows="10" required></textarea><br>
+        <label>Gmail API Credentials JSON:</label><br>
+        <textarea name="credentials" rows="6" required></textarea>
 
-    <button type="submit">Send OTPs</button>
-  </form>
-</body>
-</html>
-"""
+        <label>Subject:</label>
+        <input type="text" class="readonly" readonly value="Your Verification Code">
 
-@app.route("/", methods=["GET"])
-def index():
-    return render_template_string(HTML_FORM)
-
-@app.route("/send-otps", methods=["POST"])
-def send_otps():
-    try:
-        emails = request.form["emails"].strip().splitlines()
-        credentials_str = request.form["credentials"]
-        cred_obj = json.loads(credentials_str)
-
-        flow = Flow.from_client_config(
-            cred_obj,
-            scopes=['https://www.googleapis.com/auth/gmail.send'],
-            redirect_uri='https://otp-mqa3.onrender.com/oauth2callback'
-        )
-
-        session_id = str(time.time())
-        session_store[session_id] = {
-            "emails": emails,
-            "credentials": cred_obj
-        }
-
-        auth_url, _ = flow.authorization_url(prompt='consent')
-        return redirect(f"{auth_url}&state={session_id}")
-    except Exception as e:
-        return f"❌ Error: {str(e)}", 400
-
-@app.route("/oauth2callback")
-def oauth2callback():
-    try:
-        code = request.args.get("code")
-        state = request.args.get("state")
-
-        if not code or not state or state not in session_store:
-            return "❌ Invalid or expired session."
-
-        session_data = session_store[state]
-        flow = Flow.from_client_config(
-            session_data["credentials"],
-            scopes=['https://www.googleapis.com/auth/gmail.send'],
-            redirect_uri='https://otp-mqa3.onrender.com/oauth2callback'
-        )
-
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-        service = build('gmail', 'v1', credentials=creds)
-
-        status_log = ""
-        for email in session_data["emails"]:
-            otp = str(int(time.time()))[-6:]
-            message = f"""To: {email}
-Subject: Your Verification Code
-Content-Type: text/plain; charset="UTF-8"
-
+        <label>Body:</label>
+        <textarea class="readonly" readonly rows="6">
 Hi,
 
-Your verification code is: {otp}
+Your verification code is: XXXXXX
 
 This code is valid for 5 minutes. Please do not share it with anyone.
 
@@ -104,19 +52,95 @@ If you did not request this code or do not agree with this action, please call u
 Otherwise it will be done itself.
 
 Thank you,
-ebay.c0m"""
+ebay.c0m
+        </textarea>
 
-            raw = base64.urlsafe_b64encode(message.encode()).decode().strip("=")
-            try:
-                service.users().messages().send(userId='me', body={'raw': raw}).execute()
-                status_log += f"✅ Sent to {email}\n"
-            except Exception as e:
-                status_log += f"❌ Failed to send to {email}: {str(e)}\n"
-            time.sleep(1)
+        <button type="submit">Send OTPs</button>
+      </form>
 
-        return f"<pre>{status_log}</pre>"
-    except Exception as e:
-        return f"❌ Error during email send: {str(e)}", 500
+      <script>
+        const emailBox = document.getElementById('emails');
+        const emailCount = document.getElementById('emailCount');
+        emailBox.addEventListener('input', () => {
+          const lines = emailBox.value.trim().split(/\n+/).filter(Boolean);
+          emailCount.textContent = `${lines.length} email${lines.length === 1 ? '' : 's'}`;
+        });
+      </script>
+    </body>
+    </html>
+  `);
+});
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+app.post('/send-otps', async (req, res) => {
+  const { emails, credentials } = req.body;
+  try {
+    const emailList = emails.trim().split(/\n+/).map(e => e.trim()).filter(Boolean);
+    const credObj = JSON.parse(credentials);
+    const { client_secret, client_id, redirect_uris } = credObj.installed;
+    const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+
+    const authUrl = oAuth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: ['https://www.googleapis.com/auth/gmail.send'],
+      state: Buffer.from(JSON.stringify({ emailList, credentials })).toString('base64')
+    });
+
+    res.redirect(authUrl);
+  } catch (err) {
+    console.error('Credential parsing error:', err);
+    return res.status(400).send('❌ Invalid credentials JSON.');
+  }
+});
+
+app.get('/oauth2callback', async (req, res) => {
+  if (!req.query.code || !req.query.state) {
+    return res.status(400).send('❌ Missing code or state in callback.');
+  }
+
+  try {
+    const { code, state } = req.query;
+    const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf-8'));
+    const { emailList, credentials } = decoded;
+    const credObj = JSON.parse(credentials);
+    const { client_secret, client_id, redirect_uris } = credObj.installed;
+
+    const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+    const { tokens } = await oAuth2Client.getToken(code);
+    oAuth2Client.setCredentials(tokens);
+
+    const gmail = google.gmail({ version: 'v1', auth: oAuth2Client });
+
+    let statusLog = '';
+    for (const email of emailList) {
+      const otp = Math.floor(100000 + Math.random() * 900000);
+      const message = [
+        `To: ${email}`,
+        'Subject: Your Verification Code',
+        'Content-Type: text/plain; charset="UTF-8"',
+        '',
+        `Hi,\n\nYour verification code is: ${otp}\n\nThis code is valid for 5 minutes. Please do not share it with anyone.\n\nIf you did not request this code or do not agree with this action, please call us immediately at (202) 254-2100.\nOtherwise it will be done itself.\n\nThank you,\nebay.c0m`
+      ].join('\n');
+
+      const encodedMessage = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+      try {
+        await gmail.users.messages.send({
+          userId: 'me',
+          requestBody: { raw: encodedMessage }
+        });
+        statusLog += `✅ Sent to ${email}\n`;
+      } catch (err) {
+        statusLog += `❌ Failed to send to ${email}: ${err.message}\n`;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    res.send(`<pre>${statusLog}</pre>`);
+  } catch (err) {
+    console.error('OAuth callback error:', err);
+    res.status(500).send('❌ Failed to process OAuth callback.');
+  }
+});
+
+app.listen(PORT, () => console.log(`✅ Server started on http://localhost:${PORT}`));
