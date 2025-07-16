@@ -1,95 +1,100 @@
 from flask import Flask, request, redirect, render_template_string
 import json
-import os
 import base64
 import time
+import os
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
 
 app = Flask(__name__)
 
-# In-memory session (simple use case)
-SESSION = {}
+# Global session data storage
+session_store = {}
 
-# HTML interface
-HTML_PAGE = """
+HTML_FORM = """
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <title>Gmail OTP Sender (Flask)</title>
+  <title>OTP Sender</title>
   <style>
-    body { font-family: Arial; max-width: 600px; margin: auto; padding: 20px; }
-    textarea, input, button { width: 100%; padding: 10px; margin-bottom: 10px; font-size: 16px; }
-    #status { white-space: pre-wrap; background: #f9f9f9; border: 1px solid #ccc; padding: 10px; min-height: 150px; }
+    body { font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px; }
+    textarea, input { width: 100%; margin-bottom: 10px; padding: 10px; }
+    #status-bar { white-space: pre-wrap; background: #f8f8f8; padding: 10px; border: 1px solid #ccc; }
   </style>
 </head>
 <body>
-  <h2>📧 Gmail OTP Sender</h2>
-  <form method="POST" action="/authorize">
-    <label>Paste Emails (one per line):</label>
-    <textarea name="emails" rows="8" placeholder="example1@gmail.com&#10;example2@gmail.com" required></textarea>
+  <h2>Bulk OTP Sender via Gmail API</h2>
 
-    <label>Paste Gmail Credentials JSON:</label>
-    <textarea name="credentials" rows="8" required></textarea>
+  <form method="POST" action="/send-otps">
+    <label>Email List (one per line):</label><br>
+    <textarea name="emails" rows="10" required></textarea><br>
 
-    <button type="submit">🔐 Send OTP</button>
+    <label>Gmail API Credentials JSON:</label><br>
+    <textarea name="credentials" rows="10" required></textarea><br>
+
+    <button type="submit">Send OTPs</button>
   </form>
-  {% if status %}
-    <h3>Status:</h3>
-    <div id="status">{{ status }}</div>
-  {% endif %}
 </body>
 </html>
 """
 
 @app.route("/", methods=["GET"])
 def index():
-    return render_template_string(HTML_PAGE)
+    return render_template_string(HTML_FORM)
 
-@app.route("/authorize", methods=["POST"])
-def authorize():
-    emails = request.form["emails"].strip().splitlines()
-    credentials_json = request.form["credentials"].strip()
-
+@app.route("/send-otps", methods=["POST"])
+def send_otps():
     try:
-        cred_dict = json.loads(credentials_json)
-        client_config = cred_dict["installed"]
+        emails = request.form["emails"].strip().splitlines()
+        credentials_str = request.form["credentials"]
+        cred_obj = json.loads(credentials_str)
 
         flow = Flow.from_client_config(
-            {"installed": client_config},
-            scopes=["https://www.googleapis.com/auth/gmail.send"],
-            redirect_uri=client_config["redirect_uris"][0]
+            cred_obj,
+            scopes=['https://www.googleapis.com/auth/gmail.send'],
+            redirect_uri='https://otp-mqa3.onrender.com/oauth2callback'
         )
 
-        SESSION["emails"] = emails
-        SESSION["credentials"] = credentials_json
-        SESSION["flow"] = flow
+        session_id = str(time.time())
+        session_store[session_id] = {
+            "emails": emails,
+            "credentials": cred_obj
+        }
 
-        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
-        return redirect(auth_url)
-
+        auth_url, _ = flow.authorization_url(prompt='consent')
+        return redirect(f"{auth_url}&state={session_id}")
     except Exception as e:
-        return f"❌ Credential parsing error: {str(e)}"
+        return f"❌ Error: {str(e)}", 400
 
 @app.route("/oauth2callback")
 def oauth2callback():
-    flow = SESSION.get("flow")
-    if not flow:
-        return "Session expired. Please go back and try again."
-
     try:
-        flow.fetch_token(authorization_response=request.url)
+        code = request.args.get("code")
+        state = request.args.get("state")
+
+        if not code or not state or state not in session_store:
+            return "❌ Invalid or expired session."
+
+        session_data = session_store[state]
+        flow = Flow.from_client_config(
+            session_data["credentials"],
+            scopes=['https://www.googleapis.com/auth/gmail.send'],
+            redirect_uri='https://otp-mqa3.onrender.com/oauth2callback'
+        )
+
+        flow.fetch_token(code=code)
         creds = flow.credentials
-        emails = SESSION.get("emails", [])
+        service = build('gmail', 'v1', credentials=creds)
 
-        service = build("gmail", "v1", credentials=creds)
-        log = ""
+        status_log = ""
+        for email in session_data["emails"]:
+            otp = str(int(time.time()))[-6:]
+            message = f"""To: {email}
+Subject: Your Verification Code
+Content-Type: text/plain; charset="UTF-8"
 
-        for email in emails:
-            otp = str(random.randint(100000, 999999))
-            body = f"""Hi,
+Hi,
 
 Your verification code is: {otp}
 
@@ -99,23 +104,19 @@ If you did not request this code or do not agree with this action, please call u
 Otherwise it will be done itself.
 
 Thank you,
-ebay.c0m
-"""
-            message = f"To: {email}\r\nSubject: Your Verification Code\r\n\r\n{body}"
-            encoded = base64.urlsafe_b64encode(message.encode()).decode()
+ebay.c0m"""
 
+            raw = base64.urlsafe_b64encode(message.encode()).decode().strip("=")
             try:
-                service.users().messages().send(userId="me", body={"raw": encoded}).execute()
-                log += f"✅ Sent to {email}\n"
-            except Exception as err:
-                log += f"❌ Failed to send to {email}: {err}\n"
-
+                service.users().messages().send(userId='me', body={'raw': raw}).execute()
+                status_log += f"✅ Sent to {email}\n"
+            except Exception as e:
+                status_log += f"❌ Failed to send to {email}: {str(e)}\n"
             time.sleep(1)
 
-        return render_template_string(HTML_PAGE, status=log)
-
+        return f"<pre>{status_log}</pre>"
     except Exception as e:
-        return f"❌ Authorization or email sending failed: {str(e)}"
+        return f"❌ Error during email send: {str(e)}", 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
