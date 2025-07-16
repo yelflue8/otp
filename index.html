@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gmail OTP Sender</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      max-width: 600px;
+      margin: auto;
+    }
+    textarea, input, button {
+      width: 100%;
+      margin-bottom: 15px;
+      padding: 10px;
+      font-size: 16px;
+    }
+    #status {
+      white-space: pre-wrap;
+      background: #f4f4f4;
+      padding: 10px;
+      border: 1px solid #ccc;
+      height: 200px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h2>🔐 Gmail OTP Sender</h2>
+
+  <label for="emails">📧 Paste Email List (one per line)</label>
+  <textarea id="emails" rows="8" placeholder="example1@gmail.com&#10;example2@gmail.com"></textarea>
+  <div><strong>Total:</strong> <span id="emailCount">0</span> email(s)</div>
+
+  <label for="credentials">🔑 Paste Gmail Credentials (JSON)</label>
+  <textarea id="credentials" rows="10" placeholder='{"installed":{...}}'></textarea>
+
+  <label>✉️ Subject</label>
+  <input type="text" value="Your Verification Code" disabled />
+
+  <label>📨 Message</label>
+  <textarea disabled rows="6">Hi,
+
+Your verification code is: <OTP>
+
+This code is valid for 5 minutes. Please do not share it with anyone.
+
+If you did not request this code or do not agree with this action, please call us immediately at (202) 254-2100.
+Otherwise it will be done itself.
+
+Thank you,
+ebay.c0m</textarea>
+
+  <button onclick="sendOTPs()">🚀 Send OTPs</button>
+
+  <h3>Status:</h3>
+  <div id="status">No activity yet.</div>
+
+  <script>
+    const emailBox = document.getElementById("emails");
+    const emailCount = document.getElementById("emailCount");
+    emailBox.addEventListener("input", () => {
+      const lines = emailBox.value.split("\n").filter(e => e.trim());
+      emailCount.innerText = lines.length;
+    });
+
+    async function sendOTPs() {
+      const emails = emailBox.value.split("\n").map(e => e.trim()).filter(e => e);
+      const credentials = document.getElementById("credentials").value.trim();
+      const statusDiv = document.getElementById("status");
+
+      if (!emails.length || !credentials) {
+        alert("Please enter both emails and credentials.");
+        return;
+      }
+
+      statusDiv.textContent = "Please wait... Redirecting for Gmail login...";
+
+      try {
+        const res = await fetch("/send-otps", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ emails, credentials })
+        });
+
+        if (res.redirected) {
+          window.open(res.url, "_blank");
+          statusDiv.textContent = "✅ Gmail login opened in new tab. Continue there to allow email sending.";
+        } else {
+          const text = await res.text();
+          statusDiv.textContent = "❌ Error: " + text;
+        }
+      } catch (err) {
+        console.error(err);
+        statusDiv.textContent = "❌ Network error.";
+      }
+    }
+  </script>
+</body>
+</html>
